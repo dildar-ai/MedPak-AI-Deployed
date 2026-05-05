@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Nastaliq+Urdu:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased;
+  }
+}
+
+@layer components {
+  /* Dynamic Glassmorphism Card */
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-md border border-white/50 shadow-sm rounded-2xl overflow-hidden transition-all duration-300;
+  }
+  
+  .glass-card:hover {
+    @apply shadow-md border-primary-200 translate-y-[-2px];
+  }
+
+  /* Interactive Primary Button */
+  .btn-primary {
+    @apply bg-primary-600 text-white font-medium py-2.5 px-5 rounded-xl shadow-sm hover:bg-primary-500 hover:shadow-md active:scale-95 transition-all duration-200 flex items-center justify-center gap-2;
+  }
+
+  /* Secondary outline button */
+  .btn-secondary {
+    @apply bg-white text-slate-700 font-medium py-2 px-4 rounded-xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 active:scale-95 transition-all duration-200 flex items-center justify-center gap-2;
+  }
+
+  /* Search Input Field */
+  .input-search {
+    @apply w-full bg-white border border-slate-200 text-slate-900 rounded-2xl px-5 py-4 pl-12 pr-12 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all duration-200 text-lg;
+  }
+  
+  /* Status pill / Badge */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-primary {
+    @apply bg-primary-100 text-primary-800;
+  }
+  .badge-slate {
+    @apply bg-slate-100 text-slate-800;
+  }
+
+  /* Urdu Typography */
+  .font-urdu {
+    font-family: 'Noto Nastaliq Urdu', serif;
+    line-height: 2.2;
+    font-size: 1.1em;
+  }
+}
+
+/* Custom Scrollbar for Chat and Page */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9; /* slate-100 */
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1; /* slate-300 */
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8; /* slate-400 */
+}

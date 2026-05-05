@@ -1,0 +1,18 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# ChromaDB (will be rebuilt on server)
+backend/chroma_db/
+backend/chromadb/
+
+# Node
+frontend/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db   
