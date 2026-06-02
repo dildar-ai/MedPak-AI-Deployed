@@ -47,18 +47,24 @@ def _row_to_dict(row) -> dict[str, Any]:
 
 # ── 1. Medicine Search ────────────────────────────────────────────────────────
 
-def search_medicines(query: str, limit: int = 20) -> list[dict]:
+def search_medicines(query: str, limit: int = 30) -> list[dict]:
     """
-    Search by brand name OR generic/salt name (case-insensitive, fuzzy).
-    Returns combined results deduplicated by drug code.
+    Ranked search: exact match > starts-with > contains.
+    Searches brand product name, brand company name, and generic/salt name.
+    Returns results sorted by relevance score (best match first).
     """
-    q = f"%{query.strip()}%"
+    q = query.strip()
+    q_exact  = q.lower()
+    q_prefix = f"{q}%"
+    q_any    = f"%{q}%"
+
     sql = """
-        SELECT DISTINCT
+        SELECT
             d.CODE          AS drug_id,
             d.NAME          AS salt_name,
             d.INDICATIONS   AS indications,
             b.BNAME         AS brand_name,
+            bd.NAME         AS brand_product_name,
             bd.FORM         AS form,
             bd.MG           AS strength,
             bd.RETIALPRICE  AS retail_price,
@@ -66,7 +72,12 @@ def search_medicines(query: str, limit: int = 20) -> list[dict]:
             bd.PACKING      AS packing,
             co.NAME         AS company,
             bd.DID          AS did,
-            bd.BID          AS bid
+            bd.BID          AS bid,
+            CASE
+              WHEN LOWER(bd.NAME) = ?   OR LOWER(b.BNAME) = ?   OR LOWER(d.NAME) = ?   THEN 1
+              WHEN LOWER(bd.NAME) LIKE ? OR LOWER(b.BNAME) LIKE ? OR LOWER(d.NAME) LIKE ? THEN 2
+              ELSE 3
+            END AS relevance
         FROM BRAND_DRUG bd
         JOIN BRAND   b  ON bd.BID  = b.BID
         JOIN DRUG    d  ON bd.DID  = d.CODE
@@ -74,19 +85,28 @@ def search_medicines(query: str, limit: int = 20) -> list[dict]:
         WHERE bd.NAME LIKE ?
            OR b.BNAME  LIKE ?
            OR d.NAME   LIKE ?
-        ORDER BY bd.NAME
+        ORDER BY relevance ASC, bd.NAME ASC
         LIMIT ?
     """
+    params = (
+        q_exact, q_exact, q_exact,
+        q_prefix, q_prefix, q_prefix,
+        q_any, q_any, q_any,
+        limit
+    )
     with get_conn() as conn:
-        rows = conn.execute(sql, (q, q, q, limit)).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
-    results = []
+    seen: dict[int, dict] = {}
     for row in rows:
         r = _row_to_dict(row)
         r["retail_price_num"] = _clean_price(r["retail_price"])
         r["company"] = (r.get("company") or "").strip() or "Unknown"
-        results.append(r)
-    return results
+        did = r["drug_id"]
+        if did not in seen or r["relevance"] < seen[did]["relevance"]:
+            seen[did] = r
+
+    return list(seen.values())
 
 
 # ── 2. Full Drug Detail ───────────────────────────────────────────────────────

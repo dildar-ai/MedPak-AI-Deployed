@@ -43,8 +43,18 @@ export const medicineApi = {
   checkInteractions: async (drugId1, drugId2) => {
     const response = await api.get(`/medicine/interactions/${drugId1}/${drugId2}`);
     return response.data;
-  }
+  },
+
+  chat: async (message, drugId, sessionId = null) => {
+    const response = await api.post('/medicine/chat', {
+      message,
+      drug_id: drugId,
+      session_id: sessionId,
+    });
+    return response.data;
+  },
 };
+
 
 export const chatApi = {
   sendMessage: async (message, sessionId = null) => {
