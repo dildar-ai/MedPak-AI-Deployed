@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv
 venv
 __pycache__/
@@ -6,5 +8,10 @@ __pycache__/
 *.sqlite3
 .pytest_cache/
 .mypy_cache/
+
+# Runtime state — users.db holds real emails + password hashes, never commit it
 database/history.db
+database/users.db
+database/live_prices.db
+database/chroma_store/
 *.log

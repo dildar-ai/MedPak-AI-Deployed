@@ -1,0 +1,18 @@
+# Secrets — never bake into the image (set via Space settings instead)
+.env
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Local runtime state (regenerated in the container)
+database/history.db
+database/users.db
+database/live_prices.db
+database/chroma_store/
+*.log
+
+# Deployment helpers (not needed inside the image)
+deploy_to_hf.ps1

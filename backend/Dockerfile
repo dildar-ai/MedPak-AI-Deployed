@@ -14,17 +14,29 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python packages
+# CPU-only PyTorch first: the default Linux wheels bundle CUDA (~4 GB) that a
+# CPU-only deployment never uses — skipping it shrinks the image and cuts
+# build time by more than half.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all backend source files
-COPY . .
+# Hugging Face Spaces runs the container as UID 1000 — create that user and
+# make /app writable so SQLite DBs (live_prices, users, history) can update.
+RUN useradd -m -u 1000 user
+COPY --chown=user:user . .
+RUN mkdir -p /app/database && chown -R user:user /app/database
 
-# Set PYTHONPATH so all internal imports work (e.g. from config import settings)
-ENV PYTHONPATH=/app
+# EasyOCR downloads its models to $HOME/.EasyOCR at runtime
+ENV HOME=/home/user \
+    PYTHONPATH=/app
+
+USER user
 
 # Expose Hugging Face default port
 EXPOSE 7860
 
-# Start FastAPI with uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Start FastAPI with uvicorn.
+# --proxy-headers: Hugging Face routes traffic through its proxy — without
+# this every visitor shares the proxy's IP and one combined rate-limit bucket.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860", "--proxy-headers", "--forwarded-allow-ips", "*"]

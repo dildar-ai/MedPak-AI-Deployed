@@ -2,9 +2,11 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   ArrowLeft, AlertTriangle, ShieldAlert, CheckCircle2,
   Pill, Activity, Receipt, Loader2, Info, MessageSquareHeart,
-  Bot, User, Send, Sparkles,
+  Bot, User, Send, Sparkles, Wifi, TrendingDown,
+  RefreshCw, Clock,
 } from 'lucide-react';
 import { medicineApi } from '../lib/api';
+import { unitWord } from '../lib/format';
 import ReactMarkdown from 'react-markdown';
 
 // ── Reusable info section ───────────────────────────────────────────────────
@@ -159,29 +161,117 @@ const MedicineChat = ({ drugId, drugName }) => {
 };
 
 // ── Main MedicineDetail component ───────────────────────────────────────────
+// Poll the alternatives endpoint while the backend's background bulk scrape
+// (ALL brands of this salt, scraped simultaneously) is still running.
+const POLL_INTERVAL_MS = 2500;
+const MAX_POLLS = 80; // ~3.3 minutes
+
 const MedicineDetail = ({ drugId, brandData, onBack }) => {
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [alternatives, setAlternatives] = useState([]);
+  const [altData, setAltData] = useState(null);
+  const [altLoading, setAltLoading] = useState(false);
+  const [altError, setAltError] = useState(false);
+  const [pricesLoading, setPricesLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('info');
+  const pollCountRef = useRef(0);
+  const pollTimerRef = useRef(null);
+
+  // Live price for the clicked brand (DB prices are outdated — never shown)
+  const [brandLivePrice, setBrandLivePrice] = useState(null);
+  // What the price covers, e.g. { pack_desc: "10 caps", price_per_unit: 15.9 }
+  const [brandPackInfo, setBrandPackInfo] = useState(null);
+  const [brandPriceState, setBrandPriceState] = useState('fetching'); // fetching | done
+
+  const fetchAlternatives = async (isPoll = false) => {
+    if (!isPoll) setAltLoading(true);
+    if (isPoll) setPricesLoading(true);
+    try {
+      // Compare against the brand the user clicked, when known
+      const brand = brandData?.brand_product_name || brandData?.brand_name || null;
+      const brandForm = brandData?.form || null;
+      const brandStrength = brandData?.strength || null;
+      const data = await medicineApi.getAlternatives(drugId, brand, brandForm, brandStrength);
+      setAltData(data);
+      setAltError(false);
+      // The backend responds instantly with saved prices and scrapes ALL
+      // remaining brands of this salt in the background — keep polling
+      // while that job runs so new prices fill in automatically.
+      const scraping = data.scraping;
+      if (scraping?.in_progress && pollCountRef.current < MAX_POLLS) {
+        pollCountRef.current += 1;
+        pollTimerRef.current = setTimeout(() => fetchAlternatives(true), POLL_INTERVAL_MS);
+      } else {
+        setPricesLoading(false);
+      }
+    } catch (err) {
+      console.error('Failed to load alternatives', err);
+      setAltError(true);
+      setPricesLoading(false);
+    } finally {
+      if (!isPoll) setAltLoading(false);
+    }
+  };
 
   useEffect(() => {
+    pollCountRef.current = 0;
+    clearTimeout(pollTimerRef.current);
     const fetchDetails = async () => {
       setLoading(true);
       try {
-        const data = await medicineApi.getDetails(drugId);
+        const brandName = brandData?.brand_product_name || null;
+        const data = await medicineApi.getDetails(drugId, brandName);
         setDetails(data);
-        medicineApi.getAlternatives(drugId)
-          .then(altData => setAlternatives(altData.alternatives || []))
-          .catch(err => console.error("Failed to load alternatives", err));
+        fetchAlternatives(false);
       } catch (error) {
-        console.error("Failed to load details", error);
+        console.error('Failed to load details', error);
       } finally {
         setLoading(false);
       }
     };
     if (drugId) fetchDetails();
+    return () => {
+      pollCountRef.current = MAX_POLLS + 1; // stop polling after unmount
+      clearTimeout(pollTimerRef.current);
+    };
   }, [drugId]);
+
+  // Fetch the live price for the clicked brand (this waits for the scrape)
+  useEffect(() => {
+    let cancelled = false;
+    if (brandData?.live_price_pkr) {
+      setBrandLivePrice(brandData.live_price_pkr);
+      setBrandPackInfo({
+        pack_desc: brandData.pack_desc || null,
+        price_per_unit: brandData.price_per_unit || null,
+      });
+      setBrandPriceState('done');
+      return;
+    }
+    setBrandLivePrice(null);
+    setBrandPackInfo(null);
+    setBrandPriceState('fetching');
+    (async () => {
+      try {
+        const name = brandData?.brand_product_name || brandData?.brand_name || details?.drug?.NAME;
+        if (name) {
+          const data = await medicineApi.getLivePrice(name, brandData?.strength || null);
+          if (!cancelled) {
+            setBrandLivePrice(data.live_price_pkr);
+            setBrandPackInfo({
+              pack_desc: data.pack_desc || null,
+              price_per_unit: data.price_per_unit || null,
+            });
+          }
+        }
+      } catch {
+        // price simply unavailable
+      } finally {
+        if (!cancelled) setBrandPriceState('done');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [drugId, brandData, details]);
 
   if (loading) {
     return (
@@ -204,6 +294,13 @@ const MedicineDetail = ({ drugId, brandData, onBack }) => {
   }
 
   const { drug, dosage } = details;
+
+  // Combination products (e.g. Panadol-CF) have multiple salts. Show the
+  // full composition instead of only the single salt of the clicked DID.
+  const saltNames = details?.salts?.length
+    ? details.salts.map(s => s.salt_name)
+    : [drug.NAME];
+  const displaySalt = saltNames.join(' + ');
 
   const tabs = [
     { key: 'info',         label: 'Information',  icon: Activity },
@@ -228,14 +325,43 @@ const MedicineDetail = ({ drugId, brandData, onBack }) => {
         <div className="relative z-10">
           <div className="flex flex-wrap items-center gap-2 mb-3">
             <span className="badge badge-primary">Code: {drug.CODE}</span>
-            <span className="badge badge-slate">Generic Salt</span>
+            <span className="badge badge-slate">{saltNames.length > 1 ? 'Combination Salt' : 'Generic Salt'}</span>
           </div>
-          <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-1">{drug.NAME}</h2>
+          <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-1">{displaySalt}</h2>
           {brandData?.brand_name && brandData.brand_name !== drug.NAME && (
             <p className="text-base text-slate-600 font-medium">
               Brand: <span className="text-primary-700 font-semibold">{brandData.brand_name}</span>
             </p>
           )}
+
+          {/* ── Price Section (live only — DB prices are outdated) ── */}
+          <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
+            {brandLivePrice ? (
+              <div className="flex flex-wrap items-center gap-2 text-emerald-600 text-sm">
+                <Wifi className="w-4 h-4" />
+                <span>Live Price: <strong className="text-emerald-700">Rs. {brandLivePrice}</strong></span>
+                {brandPackInfo?.pack_desc && (
+                  <span className="text-slate-400">for {brandPackInfo.pack_desc}</span>
+                )}
+                {brandPackInfo?.price_per_unit > 0 && (
+                  <span className="text-slate-400">
+                    (Rs. {brandPackInfo.price_per_unit} per {unitWord(brandPackInfo.pack_desc)})
+                  </span>
+                )}
+                <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full border border-emerald-200">LIVE</span>
+              </div>
+            ) : brandPriceState === 'fetching' ? (
+              <div className="flex items-center gap-2 text-slate-400 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Fetching live price…</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-slate-400 text-sm">
+                <Wifi className="w-4 h-4" />
+                <span>Live price unavailable right now</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -326,10 +452,23 @@ const MedicineDetail = ({ drugId, brandData, onBack }) => {
                           <p className="font-bold text-slate-900">{d.DOSE}</p>
                           {d.INSTRUCTION && <p className="text-slate-500 text-sm mt-1">{d.INSTRUCTION}</p>}
                         </div>
-                        <div className="flex gap-2 flex-wrap">
-                          <span className="badge badge-primary">{d.FREQ}</span>
-                          <span className="badge bg-slate-200 text-slate-700">{d.ROUTE}</span>
-                          {d.SINGLE && <span className="badge bg-purple-100 text-purple-700">Max: {d.SINGLE}</span>}
+                        {/* Plain-language badges — "24 hourly"→"Once daily", "PO"→"By mouth" */}
+                        <div className="flex gap-2 flex-wrap md:justify-end">
+                          {(d.freq_human || d.FREQ) && (
+                            <span className="badge badge-primary" title="How often to take it">
+                              {d.freq_human || d.FREQ}
+                            </span>
+                          )}
+                          {(d.route_human || d.ROUTE) && (
+                            <span className="badge bg-slate-200 text-slate-700" title="How the medicine is taken">
+                              {d.route_human || d.ROUTE}
+                            </span>
+                          )}
+                          {(d.single_human || d.SINGLE) && (
+                            <span className="badge bg-purple-100 text-purple-700" title="Maximum amount in a single dose">
+                              {d.single_human || `Max single dose: ${d.SINGLE}`}
+                            </span>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -348,42 +487,256 @@ const MedicineDetail = ({ drugId, brandData, onBack }) => {
         )}
 
         {/* ALTERNATIVES TAB */}
-        {activeTab === 'alternatives' && (
-          <div className="animate-fade-in">
-            <h3 className="text-lg font-bold text-slate-800 mb-1">Cheaper Alternatives for {drug.NAME}</h3>
-            <p className="text-sm text-slate-400 mb-5">{drug.NAME} کے سستے متبادل</p>
-            {alternatives.length > 0 ? (
-              <div className="overflow-x-auto rounded-xl border border-slate-200">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="py-3 px-4 font-semibold text-slate-700 text-sm">Brand / برانڈ</th>
-                      <th className="py-3 px-4 font-semibold text-slate-700 text-sm">Form</th>
-                      <th className="py-3 px-4 font-semibold text-slate-700 text-sm hidden md:table-cell">Company</th>
-                      <th className="py-3 px-4 font-semibold text-slate-700 text-sm text-right">Price (PKR)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {alternatives.map((alt, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50 transition-colors">
-                        <td className="py-3 px-4 font-semibold text-primary-700 text-sm">{alt.brand_product_name}</td>
-                        <td className="py-3 px-4 text-slate-600 text-sm">{alt.form} {alt.strength}</td>
-                        <td className="py-3 px-4 text-slate-500 text-sm hidden md:table-cell">{alt.company}</td>
-                        <td className="py-3 px-4 font-bold text-slate-800 text-right text-sm">{alt.retail_price}</td>
+        {activeTab === 'alternatives' && (() => {
+          // Initial loading state
+          if (altLoading && !altData) {
+            return (
+              <div className="flex flex-col items-center justify-center py-16">
+                <Loader2 className="w-8 h-8 text-primary-500 animate-spin mb-3" />
+                <p className="text-slate-500 font-medium">Loading price comparison...</p>
+                <p className="text-sm text-slate-400 mt-1 font-urdu">قیمتوں کا موازنہ لوڈ ہو رہا ہے...</p>
+              </div>
+            );
+          }
+          // Error state — show message with retry
+          if (altError && !altData) {
+            return (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <AlertTriangle className="w-10 h-10 text-amber-400 mb-3" />
+                <p className="text-slate-700 font-semibold mb-1">Couldn’t load price comparison</p>
+                <p className="text-sm text-slate-500 mb-4 max-w-xs">
+                  The request timed out. Please try again — it may take a moment for medicines with many brands.
+                </p>
+                <button
+                  onClick={() => { setAltError(false); setAltLoading(true); fetchAlternatives(false); }}
+                  className="btn-primary"
+                >
+                  <RefreshCw className="w-4 h-4" /> Retry
+                </button>
+              </div>
+            );
+          }
+
+          const alts = altData?.alternatives || [];
+          const cheapest = altData?.cheapest;
+          const coverage = altData?.price_coverage;
+          const currentBrand = altData?.current_brand;
+          const scraping = altData?.scraping;
+          const scrapePct = scraping?.brands_total > 0
+            ? Math.round((scraping.brands_done / scraping.brands_total) * 100)
+            : 0;
+          const hasAlts = alts.length > 0;
+
+          return (
+            <div className="animate-fade-in">
+              <div className="flex items-start justify-between mb-1">
+                <h3 className="text-lg font-bold text-slate-800">Price Comparison — {displaySalt}</h3>
+                {pricesLoading && (
+                  <span className="flex items-center gap-1.5 text-xs text-amber-600 font-medium">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Updating prices...
+                  </span>
+                )}
+                {altError && altData && (
+                  <span className="flex items-center gap-1.5 text-xs text-red-500 font-medium">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Price update failed — showing cached data
+                  </span>
+                )}
+              </div>
+              <p className="text-sm text-slate-400 mb-4">{displaySalt} کے تمام برانڈز اور قیمتیں</p>
+
+              {/* Live scrape progress — the backend is checking ALL brands
+                  of this salt simultaneously in the background */}
+              {scraping?.in_progress && (
+                <div className="bg-primary-50 border border-primary-200 rounded-xl p-4 mb-5">
+                  <div className="flex items-center gap-2 text-primary-800 text-sm font-semibold mb-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Fetching live prices for all {scraping.brands_total} brands…
+                  </div>
+                  <div className="h-1.5 bg-primary-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary-500 rounded-full transition-all duration-700"
+                      style={{ width: `${scrapePct}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-primary-600 mt-2">
+                    {scraping.brands_done} of {scraping.brands_total} brands checked — prices appear
+                    below as they're found and are saved for your next visit.
+                  </p>
+                </div>
+              )}
+
+              {/* Savings Banner — only when both sides have live prices */}
+              {cheapest && currentBrand?.best_price && cheapest.best_price < currentBrand.best_price && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-5 flex flex-wrap items-center gap-3">
+                  <div className="w-9 h-9 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center">
+                    <TrendingDown className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-bold text-emerald-800 text-sm">
+                      Cheapest: {cheapest.brand_product_name} at Rs. {cheapest.best_price}
+                      {cheapest.pack_desc ? ` for ${cheapest.pack_desc}` : ''}
+                      {cheapest.price_per_unit > 0 ? ` (Rs. ${cheapest.price_per_unit}/${unitWord(cheapest.pack_desc)})` : ''}
+                    </p>
+                    <p className="text-emerald-600 text-xs">
+                      Save Rs. {cheapest.savings?.save_pkr ?? 0}
+                      {cheapest.savings_basis === 'per_unit' ? ` per ${unitWord(cheapest.pack_desc)}` : ''} ({cheapest.savings?.save_pct || 0}% cheaper than {currentBrand.name})
+                    </p>
+                  </div>
+                  {cheapest.price_source === 'live' && (
+                    <span className="flex items-center gap-1 text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full border border-emerald-200 font-medium">
+                      <Wifi className="w-3 h-3" /> LIVE
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Reference brand without a live price → savings can't be trusted */}
+              {currentBrand && !currentBrand.best_price && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-5 text-xs text-slate-500">
+                  Live price for <strong>{currentBrand.name}</strong> couldn't be found online, so savings
+                  can't be calculated. Prices below are live prices from Pakistani pharmacies.
+                </div>
+              )}
+
+              {/* Coverage Indicator */}
+              {coverage && coverage.with_live > 0 && (
+                <div className="flex items-center gap-2 mb-4 text-xs text-slate-500">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>
+                    Live prices for {coverage.with_live} of {coverage.total} brands
+                    {coverage.no_live_price > 0 && (
+                      <span className="text-slate-400"> — {coverage.no_live_price} couldn't be priced online</span>
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {hasAlts ? (
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200">
+                        <th className="py-3 px-4 font-semibold text-slate-700 text-xs">Brand</th>
+                        <th className="py-3 px-3 font-semibold text-slate-700 text-xs">Form</th>
+                        <th className="py-3 px-3 font-semibold text-slate-700 text-xs hidden md:table-cell">Company</th>
+                        <th className="py-3 px-3 font-semibold text-slate-700 text-xs text-right">Live Price</th>
+                        <th className="py-3 px-3 font-semibold text-slate-700 text-xs text-right hidden lg:table-cell">Per Unit</th>
+                        <th className="py-3 px-3 font-semibold text-slate-700 text-xs text-right">Savings</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="text-center py-12 text-slate-500">
-                <Receipt className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-                <p>No priced alternatives found.</p>
-                <p className="text-sm text-slate-400 mt-1">کوئی متبادل نہیں ملا۔</p>
-              </div>
-            )}
-          </div>
-        )}
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {alts.map((alt, idx) => {
+                        const isLive = alt.price_source === 'live';
+                        const savings = alt.savings;
+                        const isCheapest = idx === 0 && alts.length > 1;
+                        const isYours = currentBrand && alt.brand_product_name === currentBrand.name;
+                        return (
+                          <tr key={idx} className={`hover:bg-slate-50 transition-colors ${isCheapest ? 'bg-emerald-50/40' : ''} ${isYours ? 'bg-primary-50/50' : ''}`}>
+                            {/* Brand */}
+                            <td className="py-3 px-4">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-semibold text-primary-700 text-sm">{alt.brand_product_name}</span>
+                                {isYours && (
+                                  <span className="text-[9px] bg-primary-100 text-primary-700 px-1.5 py-0.5 rounded-full font-semibold border border-primary-200">
+                                    Yours
+                                  </span>
+                                )}
+                                {isLive && (
+                                  <span className="flex items-center gap-0.5 text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">
+                                    <Wifi className="w-2.5 h-2.5" />
+                                  </span>
+                                )}
+                              </div>
+                              {alt.sources?.[0]?.name && (
+                                <p className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[120px]">{alt.sources[0].name}</p>
+                              )}
+                            </td>
+                            {/* Form */}
+                            <td className="py-3 px-3 text-slate-600 text-xs">{alt.form} {alt.strength}</td>
+                            {/* Company */}
+                            <td className="py-3 px-3 text-slate-500 text-xs hidden md:table-cell">{alt.company}</td>
+                            {/* Live Price — always says what it covers */}
+                            <td className="py-3 px-3 text-right align-top">
+                              {alt.live_price ? (
+                                <div>
+                                  <span className="font-bold text-emerald-700 text-sm">Rs. {alt.live_price}</span>
+                                  {alt.pack_desc ? (
+                                    <div className="text-[10px] text-slate-400 mt-0.5">for {alt.pack_desc}</div>
+                                  ) : alt.price_title ? (
+                                    <div className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[140px] mx-auto" title={alt.price_title}>
+                                      as listed
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : pricesLoading || scraping?.in_progress ? (
+                                <span className="inline-block w-12 h-4 bg-slate-200 rounded animate-pulse" />
+                              ) : (
+                                <span className="text-slate-400 text-xs">—</span>
+                              )}
+                            </td>
+                            {/* Per Unit — only when derived from the scraped pack */}
+                            <td className="py-3 px-3 text-right hidden lg:table-cell">
+                              {alt.price_per_unit > 0 ? (
+                                <span className="text-slate-600 text-xs">
+                                  Rs. {alt.price_per_unit}/{unitWord(alt.pack_desc)}
+                                </span>
+                              ) : (
+                                <span className="text-slate-300 text-xs">—</span>
+                              )}
+                            </td>
+                            {/* Savings — live vs live only, per-unit when both packs known */}
+                            <td className="py-3 px-3 text-right">
+                              {!savings ? (
+                                <span className="text-slate-300 text-xs">—</span>
+                              ) : savings.is_cheaper ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span className="inline-flex items-center gap-0.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                    <TrendingDown className="w-3 h-3" />
+                                    {savings.save_pct}%
+                                  </span>
+                                  {alt.savings_basis === 'per_unit' && (
+                                    <span className="text-[9px] text-slate-400">per {unitWord(alt.pack_desc)}</span>
+                                  )}
+                                </div>
+                              ) : savings.save_pct === 0 ? (
+                                <span className="text-slate-400 text-xs">same</span>
+                              ) : (
+                                <span className="text-red-400 text-xs font-medium">+{Math.abs(savings.save_pct || 0)}%</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-12 text-slate-500">
+                  <Receipt className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  {pricesLoading ? (
+                    <p>Fetching live prices from pharmacies...</p>
+                  ) : (
+                    <>
+                      <p>No live prices available right now.</p>
+                      <p className="text-sm text-slate-400 mt-1 max-w-sm mx-auto">
+                        We only show verified live prices — database prices are outdated and never displayed.
+                        Try again in a few minutes.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Footer note */}
+              {hasAlts && (
+                <p className="text-[11px] text-slate-400 mt-4 text-center">
+                  All prices are live from Pakistani pharmacy websites and include the pack they refer to.
+                  Savings compare live prices only — per unit when both pack sizes are known.
+                </p>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ASK AI TAB */}
         {activeTab === 'askai' && (
@@ -393,11 +746,11 @@ const MedicineDetail = ({ drugId, brandData, onBack }) => {
                 <Sparkles className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-bold text-slate-800 text-base">Ask AI about {drug.NAME}</h3>
-                <p className="text-xs text-slate-400">{drug.NAME} کے بارے میں سوال پوچھیں</p>
+                <h3 className="font-bold text-slate-800 text-base">Ask AI about {displaySalt}</h3>
+                <p className="text-xs text-slate-400">{displaySalt} کے بارے میں سوال پوچھیں</p>
               </div>
             </div>
-            <MedicineChat drugId={drugId} drugName={drug.NAME} />
+            <MedicineChat drugId={drugId} drugName={displaySalt} />
           </div>
         )}
       </div>

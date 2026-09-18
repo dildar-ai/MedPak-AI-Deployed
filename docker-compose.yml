@@ -1,0 +1,36 @@
+# MedPak AI — Docker Compose
+# Run the full stack with:  docker-compose up --build
+#
+# Backend  → http://localhost:8000  (API + Swagger at /docs)
+# Frontend → http://localhost:3000  (React app, proxies /api to backend)
+
+services:
+  backend:
+    build: ./backend
+    container_name: medpak-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - PORT=8000
+    volumes:
+      # Persist SQLite databases across restarts
+      - medpak-data:/app/database
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Point the Vite build at the backend container
+        VITE_API_BASE_URL: "http://localhost:8000/api"
+    container_name: medpak-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  medpak-data:

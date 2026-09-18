@@ -18,6 +18,7 @@ import re
 from typing import Any
 from contextlib import contextmanager
 from config import settings
+from utils.dosage_utils import humanize_dosage_rows
 
 
 # ── Connection helpers ────────────────────────────────────────────────────────
@@ -47,16 +48,39 @@ def _row_to_dict(row) -> dict[str, Any]:
 
 # ── 1. Medicine Search ────────────────────────────────────────────────────────
 
-def search_medicines(query: str, limit: int = 30) -> list[dict]:
-    """
-    Ranked search: exact match > starts-with > contains.
-    Searches brand product name, brand company name, and generic/salt name.
-    Returns results sorted by relevance score (best match first).
-    """
-    q = query.strip()
-    q_exact  = q.lower()
+# Generic dosage-form words that add nothing to a medicine search ("panadol tablet").
+_TOKEN_STOPWORDS = {
+    "tablet", "tablets", "tab", "tabs", "capsule", "capsules", "cap", "caps",
+    "syrup", "suspension", "susp", "injection", "injections", "inj", "infusion",
+    "cream", "gel", "drops", "drop", "ointment", "lotion", "spray", "suppository",
+    "sachet", "sachets", "mg", "ml", "mcg", "gm", "g", "iu", "for", "the",
+    "of", "with", "and", "please", "medicine", "brand", "price",
+}
+
+# Cached lowercase name lists for fuzzy (typo) matching — loaded once on demand.
+_fuzzy_cache: dict[str, list[str]] = {}
+
+
+def _load_fuzzy_lists() -> None:
+    if "brands" in _fuzzy_cache:
+        return
+    with get_conn() as conn:
+        brands = [r[0].lower() for r in conn.execute("SELECT DISTINCT NAME FROM BRAND_DRUG").fetchall()]
+        salts = [r[0].lower() for r in conn.execute("SELECT DISTINCT NAME FROM DRUG").fetchall()]
+    _fuzzy_cache["brands"] = [b for b in brands if b]
+    _fuzzy_cache["salts"] = [s for s in salts if s]
+
+
+def _keyword_sql(q: str, fetch: int) -> list[dict]:
+    """Single-keyword ranked SQL search: exact > starts-with > contains."""
+    q_exact = q.lower()
     q_prefix = f"{q}%"
-    q_any    = f"%{q}%"
+    q_any = f"%{q}%"
+    # Separator-insensitive form: "Panadol CF" matches "PANADOL-CF" and
+    # "Augmentin 625" matches "AUGMENTIN 625" regardless of hyphen/space mix.
+    q_compact = re.sub(r"[\s\-]+", "", q_exact)
+    q_compact_prefix = f"{q_compact}%"
+    q_compact_any = f"%{q_compact}%"
 
     sql = """
         SELECT
@@ -74,8 +98,10 @@ def search_medicines(query: str, limit: int = 30) -> list[dict]:
             bd.DID          AS did,
             bd.BID          AS bid,
             CASE
-              WHEN LOWER(bd.NAME) = ?   OR LOWER(b.BNAME) = ?   OR LOWER(d.NAME) = ?   THEN 1
-              WHEN LOWER(bd.NAME) LIKE ? OR LOWER(b.BNAME) LIKE ? OR LOWER(d.NAME) LIKE ? THEN 2
+              WHEN LOWER(bd.NAME) = ?   OR LOWER(b.BNAME) = ?   OR LOWER(d.NAME) = ?
+                OR REPLACE(REPLACE(LOWER(bd.NAME), '-', ''), ' ', '') = ? THEN 1
+              WHEN LOWER(bd.NAME) LIKE ? OR LOWER(b.BNAME) LIKE ? OR LOWER(d.NAME) LIKE ?
+                OR REPLACE(REPLACE(LOWER(bd.NAME), '-', ''), ' ', '') LIKE ? THEN 2
               ELSE 3
             END AS relevance
         FROM BRAND_DRUG bd
@@ -85,28 +111,131 @@ def search_medicines(query: str, limit: int = 30) -> list[dict]:
         WHERE bd.NAME LIKE ?
            OR b.BNAME  LIKE ?
            OR d.NAME   LIKE ?
+           OR REPLACE(REPLACE(LOWER(bd.NAME), '-', ''), ' ', '') LIKE ?
         ORDER BY relevance ASC, bd.NAME ASC
         LIMIT ?
     """
     params = (
-        q_exact, q_exact, q_exact,
-        q_prefix, q_prefix, q_prefix,
-        q_any, q_any, q_any,
-        limit
+        q_exact, q_exact, q_exact, q_compact,
+        q_prefix, q_prefix, q_prefix, q_compact_prefix,
+        q_any, q_any, q_any, q_compact_any,
+        fetch,
     )
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
 
-    seen: dict[int, dict] = {}
+    # Deduplicate by brand product name so each variant (CF, Extra, etc.)
+    # keeps its own price while collapsing duplicate DB rows.
+    seen: dict[tuple[str, str], dict] = {}
     for row in rows:
         r = _row_to_dict(row)
         r["retail_price_num"] = _clean_price(r["retail_price"])
+        r["trade_price_num"] = _clean_price(r.get("trade_price", ""))
         r["company"] = (r.get("company") or "").strip() or "Unknown"
-        did = r["drug_id"]
-        if did not in seen or r["relevance"] < seen[did]["relevance"]:
-            seen[did] = r
-
+        brand_key = (r.get("brand_product_name") or "").lower()
+        form_key = (r.get("form") or "").lower().strip()
+        key = (brand_key, form_key)
+        if key not in seen or r["relevance"] < seen[key]["relevance"]:
+            seen[key] = r
     return list(seen.values())
+
+
+def _merge_results(merged: dict[tuple[str, str], dict], rows: list[dict], base_relevance: int) -> None:
+    """Merge keyword rows into a result map, keeping the best relevance per brand+form."""
+    for r in rows:
+        r = dict(r)
+        r["relevance"] = base_relevance + min(r.get("relevance", 3), 3)
+        brand_key = (r.get("brand_product_name") or "").lower()
+        form_key = (r.get("form") or "").lower().strip()
+        key = (brand_key, form_key)
+        if key not in merged or r["relevance"] < merged[key]["relevance"]:
+            merged[key] = r
+
+
+def _fuzzy_names(q: str, n: int = 5) -> list[str]:
+    """Find close matches for typo'd queries ("Pnadol" → "panadol"), best first."""
+    import difflib
+
+    _load_fuzzy_lists()
+    cutoff = 0.75 if len(q) >= 6 else 0.80
+    q_chars = set(q)
+    min_shared = min(3, len(q_chars))
+    scored: list[tuple[float, str]] = []
+    for name in _fuzzy_cache["salts"] + _fuzzy_cache["brands"]:
+        if abs(len(name) - len(q)) > 3:
+            continue
+        # Cheap pre-filter: must share a few distinct characters at all
+        if len(q_chars & set(name)) < min_shared:
+            continue
+        ratio = difflib.SequenceMatcher(None, q, name).ratio()
+        if ratio >= cutoff:
+            scored.append((ratio, name))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [name for _, name in scored[:n]]
+
+
+def search_medicines(query: str, limit: int = 30) -> list[dict]:
+    """
+    Ranked search with graceful degradation:
+      1. Full query   — exact > starts-with > contains ("panadol")
+      2. Per-token    — informative words only ("panadol tablet" → "panadol")
+      3. Fuzzy/typo   — close matches via difflib ("Pnadol" → "PANADOL",
+                       "Abuprofen" → salt "Ibuprofen" and its brands)
+
+    Each result is enriched with the complete salt composition of its brand
+    product, so fixed-dose combinations (e.g. Panadol-CF) show every salt.
+    """
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+
+    merged: dict[tuple[str, str], dict] = {}
+
+    # ── Tier 1: full keyword search (separator-insensitive) ────────────────
+    _merge_results(merged, _keyword_sql(q, fetch=limit * 3), base_relevance=0)
+
+    # ── Tier 2: token supplement for multi-word queries ───────────────────
+    # The exact FDC match stays on top ("Panadol CF" → PANADOL-CF first),
+    # while sibling brands (plain PANADOL, PANADOL EXTRA) follow below.
+    if len(q.split()) > 1:
+        words = re.findall(r"[a-z]+", q.lower())
+        tokens = [t for t in words if len(t) >= 3 and t not in _TOKEN_STOPWORDS]
+        for rank, tok in enumerate(tokens[:3]):
+            _merge_results(merged, _keyword_sql(tok, fetch=limit), base_relevance=10 + rank)
+        # Strength numbers as last-resort supplement ("625 mg" → AUGMENTIN 625)
+        if not merged:
+            for rank, num in enumerate(re.findall(r"\d{2,}", q)[:2]):
+                _merge_results(merged, _keyword_sql(num, fetch=limit), base_relevance=15 + rank)
+
+    if not merged:
+        # ── Tier 3: fuzzy typo correction ──────────────────────────────────
+        words = re.findall(r"[a-z]+", q.lower())
+        fuzzy_tokens = [t for t in words if len(t) >= 4 and t not in _TOKEN_STOPWORDS]
+        rank = 0
+        for tok in fuzzy_tokens[:2]:
+            for name in _fuzzy_names(tok, n=3):
+                _merge_results(merged, _keyword_sql(name, fetch=limit), base_relevance=20 + rank)
+                rank += 1
+
+    if not merged:
+        # ── Tier 4: bare numbers as last resort ("625" → AUGMENTIN 625) ────
+        for rank, num in enumerate(re.findall(r"\d{2,}", q.lower())[:2]):
+            _merge_results(merged, _keyword_sql(num, fetch=limit), base_relevance=30 + rank)
+
+    results = sorted(merged.values(), key=lambda r: (r["relevance"], r.get("brand_product_name") or ""))
+
+    # ── Enrich with complete salt composition ──────────────────────────────
+    # Multi-salt brands are stored as multiple BRAND_DRUG rows; search only
+    # returns the row that matched, so attach all salts for display.
+    if results:
+        names = [r.get("brand_product_name") for r in results if r.get("brand_product_name")]
+        salt_map = get_brand_product_all_salts(names)
+        for r in results:
+            name = r.get("brand_product_name")
+            fallback = [r.get("salt_name") or r.get("NAME") or "Generic"]
+            r["salt_names"] = salt_map.get(name, fallback)
+
+    return results[:limit]
 
 
 # ── 2. Full Drug Detail ───────────────────────────────────────────────────────
@@ -172,6 +301,104 @@ def get_brand_variants(drug_id: int) -> list[dict]:
         r["company"] = (r.get("company") or "").strip() or "Unknown"
         results.append(r)
     return results
+
+
+def get_brand_product_salts(brand_product_name: str) -> list[dict]:
+    """Return every salt (DRUG row) linked to a given brand product name."""
+    sql = """
+        SELECT DISTINCT d.CODE AS drug_id, d.NAME AS salt_name
+        FROM BRAND_DRUG bd
+        JOIN DRUG d ON bd.DID = d.CODE
+        WHERE LOWER(bd.NAME) = LOWER(?)
+        ORDER BY d.NAME
+    """
+    with get_conn() as conn:
+        rows = conn.execute(sql, (brand_product_name,)).fetchall()
+    return [_row_to_dict(row) for row in rows]
+
+
+def get_brand_variants_multi(drug_ids: list[int]) -> list[dict]:
+    """All brand products for any of the given drug (salt) IDs."""
+    if not drug_ids:
+        return []
+    placeholders = ",".join("?" * len(drug_ids))
+    sql = f"""
+        SELECT
+            bd.NAME         AS brand_product_name,
+            b.BNAME         AS brand_name,
+            bd.FORM         AS form,
+            bd.MG           AS strength,
+            bd.PACKING      AS packing,
+            bd.TRADEPRICE   AS trade_price,
+            bd.RETIALPRICE  AS retail_price,
+            bd.CATEGORY     AS category,
+            co.NAME         AS company,
+            co.ADDRESS      AS company_address,
+            bd.BID          AS bid,
+            bd.DID          AS did
+        FROM BRAND_DRUG bd
+        JOIN BRAND   b  ON bd.BID = b.BID
+        LEFT JOIN COMPANY co ON b.CID = co.ID
+        WHERE bd.DID IN ({placeholders})
+        ORDER BY bd.FORM, bd.MG
+    """
+    with get_conn() as conn:
+        rows = conn.execute(sql, tuple(drug_ids)).fetchall()
+
+    results = []
+    for row in rows:
+        r = _row_to_dict(row)
+        r["retail_price_num"] = _clean_price(r["retail_price"])
+        r["trade_price_num"]  = _clean_price(r["trade_price"])
+        r["company"] = (r.get("company") or "").strip() or "Unknown"
+        results.append(r)
+    return results
+
+
+def get_salt_sets_for_brands(brand_product_names: list[str]) -> dict[str, set[int]]:
+    """
+    Map each brand product name to the set of drug (salt) IDs it contains.
+    Used to enforce exact salt-set matching for fixed-dose combinations.
+    """
+    if not brand_product_names:
+        return {}
+    placeholders = ",".join("?" * len(brand_product_names))
+    sql = f"""
+        SELECT bd.NAME AS brand_product_name, d.CODE AS drug_id
+        FROM BRAND_DRUG bd
+        JOIN DRUG d ON bd.DID = d.CODE
+        WHERE LOWER(bd.NAME) IN ({placeholders})
+    """
+    params = tuple(n.lower() for n in brand_product_names)
+    out: dict[str, set[int]] = {}
+    with get_conn() as conn:
+        for row in conn.execute(sql, params).fetchall():
+            name = row["brand_product_name"]
+            out.setdefault(name, set()).add(row["drug_id"])
+    return out
+
+
+def get_brand_product_all_salts(brand_product_names: list[str]) -> dict[str, list[str]]:
+    """
+    Map each brand product name to the ordered list of salt names it contains.
+    Used by search cards to show complete compositions (e.g. Paracetamol + Caffeine).
+    """
+    if not brand_product_names:
+        return {}
+    placeholders = ",".join("?" * len(brand_product_names))
+    sql = f"""
+        SELECT DISTINCT bd.NAME AS brand_product_name, d.NAME AS salt_name
+        FROM BRAND_DRUG bd
+        JOIN DRUG d ON bd.DID = d.CODE
+        WHERE LOWER(bd.NAME) IN ({placeholders})
+        ORDER BY d.NAME
+    """
+    params = tuple(n.lower() for n in brand_product_names)
+    out: dict[str, list[str]] = {}
+    with get_conn() as conn:
+        for row in conn.execute(sql, params).fetchall():
+            out.setdefault(row["brand_product_name"], []).append(row["salt_name"])
+    return out
 
 
 # ── 4. Cheaper Alternatives ───────────────────────────────────────────────────
@@ -256,7 +483,7 @@ def get_dosage(drug_id: int) -> dict:
                 if not dose and "not recommended" in instr:
                     continue
                 cleaned.append(r)
-            dosage[key] = cleaned
+            dosage[key] = humanize_dosage_rows(cleaned)
 
     return dosage
 

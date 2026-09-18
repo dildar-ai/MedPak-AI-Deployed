@@ -7,18 +7,37 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Primary — sampled from logo.png icon green (#1BCA9A)
         primary: {
-          50: '#f0fdf4',
-          100: '#dcfce7',
-          200: '#bbf7d0',
-          300: '#86efac',
-          400: '#4ade80',
-          500: '#22c55e',
-          600: '#16a34a',
-          700: '#15803d',
-          800: '#166534',
-          900: '#14532d',
-          950: '#052e16',
+          50: '#ecfdf6',
+          100: '#d4faeb',
+          200: '#aef2dc',
+          300: '#7ce7c7',
+          400: '#42d6ae',
+          500: '#1bca9a',
+          600: '#0c9a77',
+          700: '#0a7c61',
+          800: '#0a634f',
+          900: '#095141',
+          950: '#04302a',
+        },
+        // Medical blue — sampled from logo.png icon blue side (#0778BD)
+        medical: {
+          50: '#f0f9fe',
+          100: '#ddf1fa',
+          200: '#b6e3f4',
+          300: '#82d0ea',
+          400: '#45b6da',
+          500: '#0778bd',
+          600: '#0668a3',
+          700: '#085685',
+          800: '#0b4970',
+          900: '#0e3e5e',
+        },
+        // Wordmark navy — sampled from logo.png "MedPak" text
+        navy: {
+          DEFAULT: '#001633',
+          700: '#0a2e5a',
         },
         brand: {
           light: '#f8fafc',

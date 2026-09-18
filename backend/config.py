@@ -16,9 +16,14 @@ class Settings(BaseSettings):
     # Set DEBUG=false in production .env
     DEBUG: bool = True
 
+    # ── Server ──────────────────────────────────────────────────────────────────
+    PORT: int = 8000
+
     # ── Database ─────────────────────────────────────────────────────────────
     DB_PATH: str = str(BASE_DIR / "database" / "pharmapedia.db")
+    PRICES_DB_PATH: str = str(BASE_DIR / "database" / "live_prices.db")
     HISTORY_DB_PATH: str = str(BASE_DIR / "database" / "history.db")
+    USERS_DB_PATH: str = str(BASE_DIR / "database" / "users.db")
 
     # ── ChromaDB ─────────────────────────────────────────────────────────────
     CHROMA_DIR: str = str(BASE_DIR / "database" / "chroma_store")
@@ -27,22 +32,29 @@ class Settings(BaseSettings):
     # ── Embedding model (local, free) ─────────────────────────────────────────
     EMBED_MODEL: str = "all-MiniLM-L6-v2"
 
-    # ── LLM ──────────────────────────────────────────────────────────────────
+    # ── LLM (Groq — OpenAI-compatible API, free tier) ──────────────────────
     GROQ_API_KEY: str = ""
-    # Primary: Qwen3-32B — best Urdu/Roman Urdu/English multilingual model on Groq
-    GROQ_MODEL: str = "qwen/qwen3-32b"
-    # Fallback: LLaMA 3.3 70B — if Qwen3 is rate-limited
-    GROQ_FALLBACK_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # Primary: GPT-OSS 120B — flagship, strong multilingual
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
+    # Fallback: GPT-OSS 20B — faster, cheaper
+    GROQ_FALLBACK_MODEL: str = "openai/gpt-oss-20b"
     GROQ_MAX_TOKENS: int = 1024
-    GROQ_TEMPERATURE: float = 0.3
+    GROQ_TEMPERATURE: float = 0.2
+
+    # ── Authentication / JWT ───────────────────────────────────────────────────
+    # Generate a secret with: python -c "import secrets; print(secrets.token_hex(32))"
+    SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 1440   # 24 hours
 
     # ── Conversation memory ───────────────────────────────────────────────────
     MAX_HISTORY_TURNS: int = 5       # Last N user+assistant pairs sent to LLM
 
     # ── Uploads / OCR ────────────────────────────────────────────────────────
     MAX_UPLOAD_IMAGE_MB: int = 10
-    # EasyOCR: False works on CPU-only machines; set True in .env if you have CUDA.
-    OCR_USE_GPU: bool = False
+    # OCR.space API Key (Free tier: 25k requests/month)
+    OCR_SPACE_API_KEY: str = "helloworld"
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Dev-friendly defaults; set CORS_ORIGINS in .env as JSON, e.g. ["http://localhost:5173"]

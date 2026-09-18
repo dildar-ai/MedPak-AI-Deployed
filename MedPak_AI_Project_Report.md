@@ -1,6 +1,6 @@
 # MedPak AI — Complete Project Report
 ### Intelligent Bilingual Medicine Assistant for Pakistan
-**Version:** 1.0.0 | **Date:** May 2026
+**Version:** 1.1.0 | **Date:** September 2026
 
 ---
 
@@ -13,7 +13,7 @@
 6. Backend — Module-by-Module Breakdown
 7. Frontend — Component-by-Component Breakdown
 8. RAG Pipeline (AI Search)
-9. LLM Integration (Groq + Qwen3)
+9. LLM Integration (Groq + GPT-OSS)
 10. OCR System (Medicine Box Scanning)
 11. Key Features Summary
 12. API Endpoints Reference
@@ -105,7 +105,7 @@ In Pakistan, patients often lack access to reliable, understandable medicine inf
 | **SQLite** | Relational database | Built-in |
 | **ChromaDB** | Vector database for RAG | 1.0.7 |
 | **Sentence-Transformers** | Text embeddings | ≥3.0 |
-| **Groq SDK** | LLM API client | ≥0.28 |
+| **OpenAI SDK** | Groq LLM API client | ≥1.0 |
 | **EasyOCR** | Optical Character Recognition | ≥1.7 |
 | **Pillow** | Image processing | ≥10.0 |
 | **Pydantic** | Data validation | ≥2.11 |
@@ -124,8 +124,8 @@ In Pakistan, patients often lack access to reliable, understandable medicine inf
 ### AI Models
 | Model | Provider | Purpose |
 |---|---|---|
-| **Qwen3-32B** | Groq Cloud | Primary LLM (best Urdu support) |
-| **LLaMA 3.3 70B** | Groq Cloud | Fallback LLM (if rate-limited) |
+| **GPT-OSS 120B** | Groq (free tier) | Primary LLM (strong multilingual + reasoning) |
+| **GPT-OSS 20B** | Groq (free tier) | Fallback LLM (faster) |
 | **all-MiniLM-L6-v2** | HuggingFace (local) | Sentence embeddings for RAG |
 | **EasyOCR CRAFT** | Local | Text detection in images |
 
@@ -196,17 +196,17 @@ DRUG (1) ←──→ (N) Neonatal / Paedriatic / adult
 
 ### 6.1 `main.py` — Application Entry Point
 - Creates the FastAPI app instance with CORS middleware
-- Registers three routers: `/api/health`, `/api/medicine`, `/api/chat`
+- Registers four routers: `/api/health`, `/api/auth`, `/api/medicine`, `/api/chat`
 - CORS is configured to accept requests from all common Vite dev ports (5173, 5174, 5175, 4173)
 
 ### 6.2 `config.py` — Configuration Management
 - Uses **Pydantic Settings** to load environment variables from `.env` file
 - Defines all configurable parameters: database paths, API keys, model names, temperature, token limits
-- Supports `GROQ_API_KEY` for LLM authentication
+- Supports `GROQ_API_KEY` for LLM authentication (Groq free tier)
 - Configurable `OCR_USE_GPU` flag (defaults to False for CPU-only machines)
 
-### 6.3 `database/db.py` — Database Query Layer (356 lines)
-**9 major functions:**
+### 6.3 `database/db.py` — Database Query Layer
+**Major functions:**
 
 | Function | Purpose |
 |---|---|
@@ -219,11 +219,14 @@ DRUG (1) ←──→ (N) Neonatal / Paedriatic / adult
 | `enrich_drugs_for_cards(drugs)` | Merges DRUG data with brand data for frontend cards |
 | `get_dosage(drug_id)` | Dosage split by age group (neonatal/paediatric/adult) |
 | `get_db_stats()` | Record counts for health check |
+| `get_brand_product_salts(name)` | All salts in a combination product (e.g. Panadol CF) |
+| `get_brand_variants_multi(ids)` | Brand variants across multiple salts |
 
 **Key design decisions:**
 - Database is opened in **read-only** mode (`?mode=ro`) for safety
 - Prices are cleaned from string format ("1,234.56") to float using regex
 - `enrich_drugs_for_cards()` creates a unified data shape that the frontend can always rely on
+- Fixed-dose combinations (e.g. Panadol CF) are stored as one row per salt — helpers resolve the full salt set so search cards and alternatives compare like-for-like
 
 ### 6.4 `routers/medicine.py` — Medicine REST API
 
@@ -234,6 +237,9 @@ DRUG (1) ←──→ (N) Neonatal / Paedriatic / adult
 | `/api/medicine/{drug_id}` | GET | Full drug details + brands + dosage |
 | `/api/medicine/{drug_id}/alternatives` | GET | Cheaper alternatives list |
 | `/api/medicine/interactions/{id1}/{id2}` | GET | Drug interaction check |
+| `/api/medicine/live-price?brand=&strength=` | GET | Live price for one brand |
+| `/api/medicine/prices/refresh` | POST | Force a fresh price scrape |
+| `/api/auth/register` / `/api/auth/login` | POST | JWT authentication |
 
 **Search Flow:**
 1. User query goes to `retrieve_context()` (RAG retriever)
@@ -260,10 +266,10 @@ DRUG (1) ←──→ (N) Neonatal / Paedriatic / adult
 2. RAG retriever finds relevant drug context
 3. Context is formatted into a text block
 4. Chat history is loaded from memory
-5. Everything is sent to Groq LLM (Qwen3-32B)
+5. Everything is sent to Groq (GPT-OSS 120B)
 6. Response is saved to history and returned
 
-### 6.6 `llm/groq_client.py` — LLM Integration (195 lines)
+### 6.6 `llm/llm_client.py` — LLM Integration (Groq)
 
 **System Prompt** instructs the AI to:
 - Provide initial medicine answers in BOTH English and Urdu script
@@ -272,17 +278,19 @@ DRUG (1) ←──→ (N) Neonatal / Paedriatic / adult
 - Use bullet points, PKR currency, age groups for dosage
 - Only use provided drug context for medicine-specific answers
 
+**API:** Uses the OpenAI SDK with Groq's OpenAI-compatible endpoint. The layer is provider-agnostic — pointing base URL/model/key at any compatible provider (e.g. Alibaba Cloud DashScope) requires no code changes.
+
 **Fallback Strategy:**
 ```
-User Query → Qwen3-32B (Primary)
+User Query → GPT-OSS 120B (Primary, Groq)
                  ↓ (if rate-limited)
-             LLaMA 3.3 70B (Fallback)
+             GPT-OSS 20B (Fallback, Groq)
                  ↓ (if also fails)
              Graceful error message
 ```
 
 **`<think>` Tag Handling:**
-Qwen3 outputs internal reasoning in `<think>...</think>` blocks. These are stripped using a regex before the response reaches the user.
+GPT-OSS models may output internal reasoning in `<think>...</think>` blocks. These are stripped using a regex before the response reaches the user.
 
 ### 6.7 `llm/memory.py` — Conversation Memory (126 lines)
 - **In-memory store**: Dictionary of session_id → message list
@@ -344,9 +352,10 @@ src/
 │   └── api.js        # Axios HTTP client (all API calls)
 └── components/
     ├── Header.jsx    # Sticky header with clickable logo
-    ├── Home.jsx      # Landing page with 2 mode cards
-    ├── SearchBar.jsx # Search input + OCR buttons
-    ├── MedicineCard.jsx  # Grid card for search results
+    ├── Auth.jsx      # Login / signup screen (JWT)
+    ├── Home.jsx      # Landing page with feature highlights
+    ├── SearchBar.jsx # Search input + one-tap examples + OCR buttons
+    ├── MedicineCard.jsx  # Grid card for search results (full salt composition)
     ├── MedicineDetail.jsx # Full drug profile with tabs
     └── Chatbot.jsx   # Full-screen AI chat interface
 ```
@@ -378,13 +387,14 @@ src/
 - Defensive data access — never shows "undefined"
 
 ### 7.6 `MedicineDetail.jsx` — Drug Profile (Tabbed)
-**Three tabs:**
+**Four tabs:**
 
 | Tab | Content |
 |---|---|
 | **Information** | Overview, Uses/Indications, Side Effects, Contraindications, Warnings, Storage |
 | **Dosage** | Split by age: Neonatal (purple), Paediatric (blue), Adult (green) |
-| **Alternatives** | Table of cheaper brands with prices |
+| **Alternatives** | Live price comparison — same salt set, same dosage form, per-unit savings |
+| **Ask AI** | Inline RAG chat about this specific medicine |
 
 - Every section header is **bilingual**: "Overview / جائزہ", "Side Effects / مضر اثرات"
 - Empty states have Urdu messages
@@ -465,20 +475,25 @@ User: "Panadol kis liye use hoti hai?"
     ↓
 3. System prompt + context + chat history + user message assembled
     ↓
-4. Sent to Groq API → Qwen3-32B processes
+4. Sent to Groq API → GPT-OSS 120B processes
     ↓
 5. Response stripped of <think> tags
     ↓
 6. Saved to memory → Returned to frontend
 ```
 
-### Why Qwen3-32B?
-- **Best Urdu/Roman Urdu support** among available models on Groq
+### Why GPT-OSS on Groq?
+- **Free tier** — generous limits, perfect for demos and hackathons
+- **Fast inference** — Groq's LPU serving keeps chat responses snappy
 - Handles code-switching (mixing English + Urdu in one sentence)
 - Understands Urdu script (اردو), Roman Urdu, and English equally well
+- **OpenAI-compatible API** — provider-agnostic: switch to Alibaba Cloud DashScope or any compatible endpoint via 3 env vars
 
 ### Fallback Chain
-If Qwen3 is rate-limited → automatically falls back to LLaMA 3.3 70B → if that also fails → returns a graceful error message.
+If GPT-OSS 120B is rate-limited → automatically falls back to GPT-OSS 20B → if that also fails → returns a graceful error message.
+
+### Live Price Integration
+When the RAG retriever builds context for the LLM, it now checks for **live scraped prices** from Pakistani pharmacy websites. If a live price is available (less than 72 hours old), it is included in the context alongside or instead of the database price. This means the AI chatbot always has access to current market prices when answering medicine questions.
 
 ---
 
@@ -512,16 +527,17 @@ EasyOCR downloads ~200MB of detection + recognition models on first use. This is
 
 | Feature | Description |
 |---|---|
-| 🔍 **Hybrid AI Search** | Keyword + Vector semantic search combined |
-| 📸 **Medicine Box Scanner** | Camera or upload → OCR → auto-search |
-| 💬 **AI Chatbot** | RAG-powered, bilingual, session memory |
-| 🇵🇰 **Pakistani Focus** | PKR prices, local brands, local companies |
-| 🌐 **Bilingual UI** | English + Urdu script (Noto Nastaliq font) |
-| 💊 **Dosage by Age** | Neonatal / Paediatric / Adult dosage info |
-| 💰 **Price Comparison** | Cheaper alternatives sorted by price |
-| 🧠 **Smart Rejection** | Greetings/gibberish don't return random medicines |
-| ⚡ **Fallback LLM** | Auto-switches from Qwen3 to LLaMA if rate-limited |
-| 🔒 **Safety Disclaimers** | Every AI response includes medical disclaimer |
+| **Hybrid AI Search** | Keyword + Vector semantic search combined |
+| **Medicine Box Scanner** | Camera or upload → OCR → auto-search |
+| **AI Chatbot** | RAG-powered, bilingual, session memory |
+| **Pakistani Focus** | PKR prices, local brands, local companies |
+| **Bilingual UI** | English + Urdu script (Noto Nastaliq font) |
+| **Dosage by Age** | Neonatal / Paediatric / Adult dosage info |
+| **Price Comparison** | Live-priced alternatives matched by salt set & dosage form |
+| **Live Price Scraping** | 3-tier cache (memory → DB → web) with 72hr persistence |
+| **Smart Rejection** | Greetings/gibberish don't return random medicines |
+| **Groq GPT-OSS AI** | GPT-OSS 120B/20B via Groq (free tier) |
+| **Safety Disclaimers** | Every AI response includes medical disclaimer |
 
 ---
 
@@ -535,6 +551,10 @@ EasyOCR downloads ~200MB of detection + recognition models on first use. This is
 | GET | `/api/medicine/{id}` | Drug details |
 | GET | `/api/medicine/{id}/alternatives` | Cheaper alternatives |
 | GET | `/api/medicine/interactions/{id1}/{id2}` | Drug interaction check |
+| GET | `/api/medicine/live-price?brand=&strength=` | Live price for one brand |
+| POST | `/api/medicine/prices/refresh` | Force a fresh price scrape |
+| POST | `/api/auth/register` | Create account (JWT) |
+| POST | `/api/auth/login` | Log in (JWT) |
 | POST | `/api/chat/message` | Send chat message |
 | GET | `/api/chat/sessions` | List chat sessions |
 | GET | `/api/chat/history/{id}` | Session history |
@@ -546,7 +566,7 @@ EasyOCR downloads ~200MB of detection + recognition models on first use. This is
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- Groq API Key (free at console.groq.com)
+- Groq API Key (free at console.groq.com/keys)
 
 ### Backend Setup
 ```bash
@@ -555,6 +575,8 @@ python -m venv venv
 venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 # Create .env file with: GROQ_API_KEY=your_key_here
+# Get free key from: https://console.groq.com/keys
+python rag/vectorstore.py      # Build RAG index (first time)
 python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -572,16 +594,19 @@ cd backend
 python rag/vectorstore.py
 ```
 
+### Cloud Deployment
+Backend → Hugging Face Spaces (Docker) · Frontend → Vercel. Full step-by-step guide in `DEPLOYMENT.md`.
+
 ---
 
 ## 14. Future Enhancements
 
-1. **User Authentication** — Save personal medicine lists
+1. **Personal Medicine Lists** — saved lists per user (JWT auth already shipped)
 2. **Drug Interaction Checker UI** — Select two medicines and check conflicts
 3. **Voice Input** — Speak medicine names in Urdu
 4. **Mobile App** — React Native wrapper
 5. **Prescription Scanner** — OCR for doctor prescriptions
-6. **Production Deployment** — Docker + cloud hosting
+6. **Price Alerts** — Notify when a medicine's live price drops
 7. **Notification System** — Medicine reminders
 
 ---

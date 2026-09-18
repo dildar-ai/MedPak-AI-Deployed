@@ -1,5 +1,8 @@
 import React, { useState, useRef } from 'react';
-import { Search, Camera, UploadCloud, Loader2, X, ScanLine } from 'lucide-react';
+import { Search, Camera, UploadCloud, Loader2, X, ScanLine, Sparkles } from 'lucide-react';
+
+// One-tap examples — also showcase strengths, combos, and multi-salt support
+const EXAMPLES = ['Panadol', 'Panadol CF', 'Risek 20mg', 'Brufen 400', 'Augmentin 625'];
 
 const SearchBar = ({ onSearch, onScan, isSearching, isScanning }) => {
   const [query, setQuery] = useState('');
@@ -61,6 +64,27 @@ const SearchBar = ({ onSearch, onScan, isSearching, isScanning }) => {
           </button>
         )}
       </form>
+
+      {/* One-tap example searches */}
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <span className="inline-flex items-center gap-1 text-xs text-slate-400 font-medium">
+          <Sparkles className="w-3.5 h-3.5" /> Try:
+        </span>
+        {EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setQuery(ex);
+              onSearch(ex);
+            }}
+            className="text-xs bg-white border border-slate-200 hover:border-primary-400 hover:text-primary-700 hover:bg-primary-50/50 text-slate-600 px-3 py-1.5 rounded-full transition-all font-medium disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {ex}
+          </button>
+        ))}
+      </div>
 
       {/* Divider */}
       <div className="flex items-center gap-4 my-6">

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import re
 from rag.vectorstore import query_index
 from database.db import get_drug_by_id, get_brand_variants, get_dosage, search_medicines
+from database.prices_db import get_stored_prices
 
 
 # ── Relevance threshold ───────────────────────────────────────────────────────
@@ -122,10 +123,17 @@ def build_context_string(context: dict, max_chars: int = 3000) -> str:
         top_brands = context["brands"][:5]
         lines.append("## Pakistani Brands & Prices")
         for b in top_brands:
-            price = b["retail_price"] if b["retail_price_num"] > 0 else "N/A"
+            # Check for live price first, fall back to DB retail price
+            brand_label = b['brand_product_name']
+            live_results = get_stored_prices(brand_label, max_age_hours=72)
+            if live_results:
+                live_price = min(r['price_pkr'] for r in live_results if r.get('price_pkr') and 10 < r['price_pkr'] < 50000)
+                price_str = f"Rs.{live_price} PKR (live)"
+            else:
+                price_str = f"{b['retail_price']} PKR" if b["retail_price_num"] > 0 else "N/A"
             lines.append(
-                f"- {b['brand_product_name']} ({b['form']}, {b['strength']}, "
-                f"Packing: {b['packing']}) → Retail: {price} PKR | {b['company']}"
+                f"- {brand_label} ({b['form']}, {b['strength']}, "
+                f"Packing: {b['packing']}) -> Retail: {price_str} | {b['company']}"
             )
         lines.append("")
 

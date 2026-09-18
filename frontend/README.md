@@ -1,16 +1,34 @@
-# React + Vite
+# MedPak AI — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite + TailwindCSS frontend for **MedPak AI**, a bilingual (English + Urdu)
+medicine information assistant for Pakistan.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- 🔍 **Medicine search** — by brand, salt, or strength, with one-tap examples
+- 💰 **Live prices** — scraped from Pakistani pharmacies (never outdated DB prices)
+- 💊 **Alternatives** — same salt set, same dosage form, compared per unit
+- 📷 **Box scanning** — camera / upload → OCR → instant search
+- 🤖 **AI chat** — English, Urdu script, and Roman Urdu
+- 🔐 **JWT authentication** — register / login
 
-## React Compiler
+## Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npm run dev        # http://localhost:5173 (proxies /api to localhost:8000)
+```
 
-## Expanding the ESLint configuration
+## Production build
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm run build      # outputs to dist/
+```
+
+Set `VITE_API_BASE_URL` (e.g. `https://<your-space>.hf.space/api`) when the
+backend is not on localhost — see the root `DEPLOYMENT.md`.
+
+## Tech
+
+React 19 · Vite 8 · TailwindCSS 3 · Axios · Lucide icons · react-markdown ·
+Noto Nastaliq Urdu font for اردو text.
